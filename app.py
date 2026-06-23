@@ -8,7 +8,6 @@ from sheets_manager import (
     get_all_applications, add_application,
     update_application_status, mark_ghosted_applications
 )
-from gmail_scanner import scan_gmail
 from config import STATUS
 
 st.set_page_config(
@@ -31,97 +30,133 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ---- Check for secrets / credentials ----
+secrets_ok = "gcp_service_account" in st.secrets if hasattr(st, 'secrets') else False
+
 # ---- Sidebar ----
 with st.sidebar:
     st.title("Job Tracker")
     st.markdown("---")
 
-    if st.button("Scan Gmail Now", use_container_width=True, type="primary"):
-        with st.spinner("Scanning Gmail..."):
-            new, updated = scan_gmail(days_back=30)
-            mark_ghosted_applications()
-        st.success(f"Done! {new} new, {updated} updated")
-        st.rerun()
+    if not secrets_ok:
+        st.warning("⚠️ Google credentials not configured yet. Add secrets in Streamlit Cloud settings to enable data sync.")
+    else:
+        if st.button("Scan Gmail Now", use_container_width=True, type="primary"):
+            try:
+                from gmail_scanner import scan_gmail
+                from sheets_manager import mark_ghosted_applications
+                with st.spinner("Scanning Gmail..."):
+                    new, updated = scan_gmail(days_back=30)
+                    mark_ghosted_applications()
+                st.success(f"Done! {new} new, {updated} updated")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gmail scan failed: {e}")
 
     st.markdown("### Add Application")
     with st.form("add_form", clear_on_submit=True):
-        company = st.text_input("Company*")
-        role = st.text_input("Role*")
-        source = st.selectbox("Source", [
-            "LinkedIn", "Naukri", "Indeed", "Company Website",
-            "Referral", "Internshala", "Unstop", "Other"
-        ])
-        link = st.text_input("Job Link")
-        notes = st.text_area("Notes", height=60)
-        if st.form_submit_button("Add", use_container_width=True) and company and role:
-            add_application(company, role, source, link, notes=notes)
-            st.success("Added!")
-            st.rerun()
+        company = st.text_input("Company")
+        role = st.text_input("Role")
+        source = st.selectbox("Source", ["LinkedIn", "Naukri", "Indeed", "Referral", "Email/Auto", "Other"])
+        link = st.text_input("Job Link (optional)")
+        submitted = st.form_submit_button("Add", use_container_width=True)
+        if submitted and company and role:
+            if secrets_ok:
+                try:
+                    result = add_application(company=company, role=role, source=source, job_link=link)
+                    if result:
+                        st.success(f"Added: {company} - {role}")
+                        st.rerun()
+                    else:
+                        st.warning("Already tracked!")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.error("Credentials not configured. Please add secrets first.")
 
     st.markdown("### Update Status")
     with st.form("update_form", clear_on_submit=True):
-        u_company = st.text_input("Company*", key="uc")
-        u_role = st.text_input("Role*", key="ur")
-        u_status = st.selectbox("New Status", list(STATUS.values()))
-        u_notes = st.text_input("Notes", key="un")
-        if st.form_submit_button("Update", use_container_width=True) and u_company and u_role:
-            update_application_status(u_company, u_role, u_status, notes=u_notes)
-            st.success("Updated!")
-            st.rerun()
+        upd_company = st.text_input("Company ", key="upd_co")
+        upd_role = st.text_input("Role ", key="upd_role")
+        upd_status = st.selectbox("New Status", list(STATUS.values()))
+        upd_notes = st.text_input("Notes (optional)")
+        upd_submitted = st.form_submit_button("Update", use_container_width=True)
+        if upd_submitted and upd_company and upd_role:
+            if secrets_ok:
+                try:
+                    result = update_application_status(upd_company, upd_role, upd_status, notes=upd_notes)
+                    if result:
+                        st.success("Updated!")
+                        st.rerun()
+                    else:
+                        st.warning("Not found.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.error("Credentials not configured. Please add secrets first.")
 
-    st.markdown("---")
-    if st.button("Mark Ghosted (21+ days)", use_container_width=True):
-        mark_ghosted_applications()
-        st.rerun()
-
-# ---- Load Data ----
-@st.cache_data(ttl=120)
+# ---- Load data ----
 def load_data():
-    return get_all_applications()
+    if not secrets_ok:
+        return pd.DataFrame(columns=[
+            'Date Applied', 'Company', 'Role', 'Source', 'Job Link',
+            'Status', 'Last Updated', 'Response Date', 'Notes', 'Email Subject'
+        ])
+    try:
+        df = get_all_applications()
+        if not df.empty and 'Date Applied' in df.columns:
+            df['Date Applied'] = pd.to_datetime(df['Date Applied'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
+        return pd.DataFrame()
 
 df = load_data()
 
-if df.empty:
-    st.info("No applications yet. Add one from the sidebar or scan Gmail.")
-    st.stop()
+# ---- Banner if not configured ----
+if not secrets_ok:
+    st.warning("""
+    ### ⚙️ Setup Required
+    This app needs Google credentials to connect to your data.
+    
+    **To finish setup:**
+    1. Go to your app settings on Streamlit Cloud
+    2. Click **Secrets** and paste in your `gcp_service_account` JSON
+    3. Also add your `gmail_token` (optional, for Gmail scanning)
+    
+    See the README for the exact format needed.
+    """)
 
-for col in ['Date Applied', 'Last Updated', 'Response Date']:
-    if col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors='coerce')
-
-# ---- KPIs ----
-st.markdown("## Job Application Dashboard")
-st.markdown(f"*Refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}*")
+# ---- Main title ----
+st.title("📋 Job Application Tracker")
 st.markdown("---")
 
+if df.empty and secrets_ok:
+    st.info("No applications yet. Add your first one in the sidebar, or click 'Scan Gmail Now'!")
+    st.stop()
+
+if df.empty:
+    st.stop()
+
+# ---- KPIs ----
 total = len(df)
-responded = df[df['Status'].isin([
-    STATUS['SHORTLISTED'], STATUS['INTERVIEW'],
-    STATUS['OFFER'], STATUS['REJECTED']
-])].shape[0]
-active = df[df['Status'].isin([
-    STATUS['APPLIED'], STATUS['SHORTLISTED'], STATUS['INTERVIEW']
-])].shape[0]
-offers = df[df['Status'] == STATUS['OFFER']].shape[0]
-interviews = df[df['Status'] == STATUS['INTERVIEW']].shape[0]
-response_rate = (responded / total * 100) if total > 0 else 0
+responded = len(df[df['Status'].isin([STATUS["SHORTLISTED"], STATUS["INTERVIEW"], STATUS["OFFER"], STATUS["REJECTED"]])])
+active = len(df[df['Status'].isin([STATUS["APPLIED"], STATUS["SHORTLISTED"], STATUS["INTERVIEW"]])])
+interviews = len(df[df['Status'] == STATUS["INTERVIEW"]])
+offers = len(df[df['Status'] == STATUS["OFFER"]])
+response_rate = round((responded / total) * 100, 1) if total > 0 else 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
-for col, label, value, color in [
-    (col1, "Total Applied", total, "#667eea"),
-    (col2, "Response Rate", f"{response_rate:.1f}%", "#f39c12"),
-    (col3, "Active", active, "#27ae60"),
-    (col4, "Interviews", interviews, "#9b59b6"),
-    (col5, "Offers", offers, "#e74c3c"),
-]:
-    with col:
-        st.markdown(f"""
-        <div style="background:linear-gradient(135deg,{color}99,{color}55);
-             padding:20px;border-radius:12px;text-align:center;
-             border:1px solid {color}44;margin-bottom:8px;">
-          <div style="font-size:2rem;font-weight:700;">{value}</div>
-          <div style="font-size:0.85rem;opacity:0.9;">{label}</div>
-        </div>""", unsafe_allow_html=True)
+with col1:
+    st.metric("Total Applied", total)
+with col2:
+    st.metric("Response Rate", f"{response_rate}%")
+with col3:
+    st.metric("Active", active)
+with col4:
+    st.metric("Interviews", interviews)
+with col5:
+    st.metric("Offers", offers)
 
 st.markdown("---")
 
@@ -129,121 +164,103 @@ st.markdown("---")
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader("Applications by Status")
+    st.subheader("Status Breakdown")
     status_counts = df['Status'].value_counts().reset_index()
     status_counts.columns = ['Status', 'Count']
-    color_map = {
-        STATUS['APPLIED']: '#3498db', STATUS['SHORTLISTED']: '#f39c12',
-        STATUS['INTERVIEW']: '#9b59b6', STATUS['OFFER']: '#27ae60',
-        STATUS['REJECTED']: '#e74c3c', STATUS['GHOSTED']: '#95a5a6',
-        STATUS['WITHDRAWN']: '#bdc3c7',
-    }
-    fig = px.pie(status_counts, names='Status', values='Count',
-                 color='Status', color_discrete_map=color_map, hole=0.45)
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320)
-    st.plotly_chart(fig, use_container_width=True)
+    fig_pie = px.pie(status_counts, values='Count', names='Status',
+                     color_discrete_sequence=px.colors.qualitative.Set3)
+    st.plotly_chart(fig_pie, use_container_width=True)
 
 with col_right:
     st.subheader("Applications Over Time")
-    df_time = df.dropna(subset=['Date Applied'])
-    if not df_time.empty:
-        df_time = df_time.copy()
-        df_time['Week'] = df_time['Date Applied'].dt.to_period('W').dt.start_time
-        weekly = df_time.groupby('Week').size().reset_index(name='Applications')
-        fig2 = px.line(weekly, x='Week', y='Applications', markers=True, line_shape='spline')
-        fig2.update_traces(line_color='#667eea', marker_color='#764ba2', marker_size=7)
-        fig2.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=320)
-        st.plotly_chart(fig2, use_container_width=True)
+    if 'Date Applied' in df.columns and not df['Date Applied'].isna().all():
+        df_time = df.dropna(subset=['Date Applied'])
+        df_time = df_time.groupby(df_time['Date Applied'].dt.to_period('W')).size().reset_index()
+        df_time.columns = ['Week', 'Count']
+        df_time['Week'] = df_time['Week'].astype(str)
+        fig_line = px.line(df_time, x='Week', y='Count', markers=True)
+        st.plotly_chart(fig_line, use_container_width=True)
+    else:
+        st.info("No date data available yet.")
 
-col_left2, col_right2 = st.columns(2)
-with col_left2:
+# ---- Source analysis ----
+col_s1, col_s2 = st.columns(2)
+
+with col_s1:
     st.subheader("Top Sources")
-    if 'Source' in df.columns and df['Source'].notna().any():
-        src_df = df['Source'].value_counts().reset_index()
-        src_df.columns = ['Source', 'Count']
-        fig3 = px.bar(src_df, x='Count', y='Source', orientation='h',
-                      color='Count', color_continuous_scale='Purples')
-        fig3.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300, showlegend=False,
-                           yaxis=dict(autorange='reversed'))
-        st.plotly_chart(fig3, use_container_width=True)
-
-with col_right2:
-    st.subheader("Source Response Rate")
     if 'Source' in df.columns:
-        src_resp = df.groupby('Source').apply(
-            lambda x: (x['Status'].isin([
-                STATUS['SHORTLISTED'], STATUS['INTERVIEW'], STATUS['OFFER']
-            ])).sum() / len(x) * 100
-        ).reset_index()
-        src_resp.columns = ['Source', 'Response Rate (%)']
-        src_resp = src_resp.sort_values('Response Rate (%)', ascending=True)
-        fig4 = px.bar(src_resp, x='Response Rate (%)', y='Source', orientation='h',
-                      color='Response Rate (%)', color_continuous_scale='RdYlGn',
-                      range_color=[0, 100])
-        fig4.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300, showlegend=False)
-        st.plotly_chart(fig4, use_container_width=True)
+        src = df['Source'].value_counts().reset_index()
+        src.columns = ['Source', 'Count']
+        fig_bar = px.bar(src, x='Source', y='Count', color='Count',
+                         color_continuous_scale='Blues')
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-# ---- Self-Analysis ----
-st.markdown("---")
-st.subheader("Self-Analysis & Recommendations")
+with col_s2:
+    st.subheader("Source Response Rate")
+    if 'Source' in df.columns and 'Status' in df.columns:
+        df_resp = df.copy()
+        df_resp['Got Response'] = df_resp['Status'].isin([
+            STATUS["SHORTLISTED"], STATUS["INTERVIEW"], STATUS["OFFER"]
+        ])
+        src_resp = df_resp.groupby('Source')['Got Response'].agg(['sum', 'count']).reset_index()
+        src_resp['Response Rate (%)'] = (src_resp['sum'] / src_resp['count'] * 100).round(1)
+        src_resp.columns = ['Source', 'Responses', 'Total', 'Response Rate (%)']
+        fig_resp = px.bar(src_resp, x='Source', y='Response Rate (%)',
+                          color='Response Rate (%)', color_continuous_scale='RdYlGn',
+                          range_color=[0, 100])
+        st.plotly_chart(fig_resp, use_container_width=True)
+
+# ---- Insights ----
+st.subheader("Self-Analysis Insights")
 insights = []
 
-if response_rate < 10:
-    insights.append("Response rate below 10%. Tailor your resume more to each job description.")
-elif response_rate < 25:
-    insights.append("Moderate response rate. Add a personalised cover letter to boost callbacks.")
-else:
-    insights.append("Great response rate! Keep applying with the same approach.")
+if response_rate < 10 and total > 5:
+    insights.append("Your response rate is below 10%. Consider tailoring your resume more to each role.")
+if response_rate >= 20:
+    insights.append(f"Great job! Your {response_rate}% response rate is above average.")
+if interviews > 0 and offers == 0 and interviews >= 3:
+    insights.append("You're getting interviews but no offers yet. Focus on interview preparation.")
+if offers > 0:
+    insights.append(f"You have {offers} offer(s)! Negotiate well.")
+
+ghosted = len(df[df['Status'] == STATUS.get("GHOSTED", "Ghosted")])
+if ghosted > total * 0.4 and total > 5:
+    insights.append(f"{ghosted} applications were ghosted. Quality over quantity may help.")
 
 if 'Source' in df.columns:
-    best_src = df[df['Status'].isin([STATUS['SHORTLISTED'], STATUS['INTERVIEW'], STATUS['OFFER']])]
-    if not best_src.empty:
-        top_source = best_src['Source'].value_counts().idxmax()
-        insights.append(f"**{top_source}** is your most effective source - focus more applications there.")
+    best_src = df_resp.sort_values('Response Rate (%)').iloc[-1] if 'df_resp' in dir() else None
+    if best_src is not None and best_src['Total'] >= 3:
+        insights.append(f"'{best_src['Source']}' is your best source with {best_src['Response Rate (%)']}% response rate. Focus there!")
 
-df_resp = df[df['Response Date'].notna() & df['Date Applied'].notna()].copy()
-if not df_resp.empty:
-    df_resp['days_to_resp'] = (df_resp['Response Date'] - df_resp['Date Applied']).dt.days
-    avg_days = df_resp['days_to_resp'].mean()
-    insights.append(f"Average time to response: **{avg_days:.0f} days**.")
+if not insights:
+    insights.append("Keep applying! Insights will appear as your data grows.")
 
-if interviews > 0:
-    conversion = offers / interviews * 100
-    insights.append(f"Interview to Offer rate: **{conversion:.0f}%** ({offers}/{interviews}).")
-    if conversion < 30:
-        insights.append("Low offer conversion - focus on interview prep (mock interviews, STAR method).")
+for ins in insights:
+    st.markdown(f"""<div class="insight-box">{ins}</div>""", unsafe_allow_html=True)
 
-ghosted = df[df['Status'] == STATUS['GHOSTED']].shape[0]
-if ghosted > 5:
-    insights.append(f"{ghosted} applications ghosted. Set follow-up reminders 2 weeks after applying.")
-
-for insight in insights:
-    st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
-
-# ---- Table ----
+# ---- Filters and Table ----
 st.markdown("---")
 st.subheader("All Applications")
-f1, f2, f3 = st.columns(3)
-with f1:
-    status_filter = st.multiselect("Filter by Status", list(STATUS.values()), default=list(STATUS.values()))
-with f2:
-    sources = df['Source'].dropna().unique().tolist()
-    source_filter = st.multiselect("Filter by Source", sources, default=sources)
-with f3:
-    days_filter = st.slider("Last N days", 7, 365, 90)
 
-cutoff = datetime.today() - timedelta(days=days_filter)
-filtered = df[
-    (df['Status'].isin(status_filter)) &
-    (df['Source'].isin(source_filter) if source_filter else True) &
-    (df['Date Applied'] >= cutoff)
-].copy()
+col_f1, col_f2, col_f3 = st.columns(3)
+with col_f1:
+    status_filter = st.multiselect("Filter by Status", df['Status'].unique().tolist(), default=df['Status'].unique().tolist())
+with col_f2:
+    source_filter = st.multiselect("Filter by Source", df['Source'].unique().tolist() if 'Source' in df.columns else [], default=df['Source'].unique().tolist() if 'Source' in df.columns else [])
+with col_f3:
+    search = st.text_input("Search by Company/Role")
 
-filtered['Date Applied'] = filtered['Date Applied'].dt.strftime('%d %b %Y')
-filtered['Last Updated'] = filtered['Last Updated'].dt.strftime('%d %b %Y')
+filtered = df.copy()
+if status_filter:
+    filtered = filtered[filtered['Status'].isin(status_filter)]
+if source_filter and 'Source' in filtered.columns:
+    filtered = filtered[filtered['Source'].isin(source_filter)]
+if search:
+    mask = (
+        filtered['Company'].str.contains(search, case=False, na=False) |
+        filtered['Role'].str.contains(search, case=False, na=False)
+    )
+    filtered = filtered[mask]
 
-st.dataframe(
-    filtered[['Date Applied', 'Company', 'Role', 'Source', 'Status', 'Last Updated', 'Notes']],
-    use_container_width=True, height=400
-)
+st.dataframe(filtered, use_container_width=True, hide_index=True)
 st.caption(f"Showing {len(filtered)} of {total} applications")
