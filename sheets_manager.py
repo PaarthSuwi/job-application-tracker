@@ -1,5 +1,7 @@
 # sheets_manager.py - all Google Sheets read/write operations
 
+import os
+import json
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
@@ -11,11 +13,19 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-
 def get_client():
+    # Try Streamlit secrets first (cloud deployment)
+    try:
+        import streamlit as st
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+            return gspread.authorize(creds)
+    except Exception:
+        pass
+    # Fall back to local credentials.json
     creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
     return gspread.authorize(creds)
-
 
 def get_or_create_sheet():
     client = get_client()
@@ -32,14 +42,12 @@ def get_or_create_sheet():
         print("Headers written to sheet.")
     return worksheet
 
-
 def get_all_applications():
     worksheet = get_or_create_sheet()
     records = worksheet.get_all_records()
     if not records:
         return pd.DataFrame(columns=SHEET_COLUMNS)
     return pd.DataFrame(records)
-
 
 def application_exists(company: str, role: str) -> bool:
     df = get_all_applications()
@@ -50,7 +58,6 @@ def application_exists(company: str, role: str) -> bool:
         (df['Role'].str.lower() == role.lower())
     ]
     return not match.empty
-
 
 def add_application(company: str, role: str, source: str = "",
                     job_link: str = "", status: str = None,
@@ -69,7 +76,6 @@ def add_application(company: str, role: str, source: str = "",
     worksheet.append_row(row)
     print(f"Added: {company} - {role} [{status}]")
     return True
-
 
 def update_application_status(company: str, role: str, new_status: str,
                                notes: str = "", response_date: str = "",
@@ -116,7 +122,6 @@ def update_application_status(company: str, role: str, new_status: str,
 
     print(f"Updated: {company} - {role} -> {new_status}")
     return True
-
 
 def mark_ghosted_applications(days_threshold: int = None):
     if days_threshold is None:
