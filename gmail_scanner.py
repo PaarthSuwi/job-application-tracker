@@ -4,6 +4,7 @@ import os
 import base64
 import re
 import json
+import tempfile
 from datetime import datetime, timedelta
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -21,9 +22,30 @@ from config import (
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 PROCESSED_IDS_FILE = "processed_email_ids.json"
 
-
 def get_gmail_service():
     creds = None
+
+    # Try Streamlit secrets first (cloud deployment)
+    try:
+        import streamlit as st
+
+        # Load token from secrets if available
+        if "gmail_token" in st.secrets:
+            token_data = dict(st.secrets["gmail_token"])
+            creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                return build('gmail', 'v1', credentials=creds)
+
+        if creds and creds.valid:
+            return build('gmail', 'v1', credentials=creds)
+
+    except Exception:
+        pass
+
+    # Local fallback: use token.json or run OAuth flow
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     if not creds or not creds.valid:
@@ -38,18 +60,15 @@ def get_gmail_service():
             token.write(creds.to_json())
     return build('gmail', 'v1', credentials=creds)
 
-
 def load_processed_ids():
     if os.path.exists(PROCESSED_IDS_FILE):
         with open(PROCESSED_IDS_FILE, 'r') as f:
             return set(json.load(f))
     return set()
 
-
 def save_processed_ids(ids: set):
     with open(PROCESSED_IDS_FILE, 'w') as f:
         json.dump(list(ids), f)
-
 
 def decode_body(payload):
     body = ""
@@ -67,9 +86,8 @@ def decode_body(payload):
             body += base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
     return body
 
-
 def extract_company_from_email(sender: str, subject: str, body: str) -> str:
-    email_match = re.search(r'@([\w.-]+)', sender)
+    email_match = re.search(r'@([w.-]+)', sender)
     if email_match:
         domain = email_match.group(1)
         generic = [
@@ -90,7 +108,6 @@ def extract_company_from_email(sender: str, subject: str, body: str) -> str:
             return name.title()
     return "Unknown Company"
 
-
 def extract_role_from_subject(subject: str) -> str:
     patterns = [
         r'(?:application for|applying for|role of|position of|regarding)\s+(.+?)(?:\s+at\s+|\s*$)',
@@ -101,7 +118,6 @@ def extract_role_from_subject(subject: str) -> str:
         if match and match.lastindex:
             return match.group(1).strip().title()[:80]
     return subject[:60].title()
-
 
 def classify_email(subject: str, body: str):
     text = (subject + " " + body).lower()
@@ -115,7 +131,6 @@ def classify_email(subject: str, body: str):
         if kw.lower() in text:
             return 'rejection', kw
     return None, None
-
 
 def scan_gmail(days_back: int = None):
     if days_back is None:
@@ -178,53 +193,54 @@ def scan_gmail(days_back: int = None):
                 offer_kws = ["offer letter", "job offer", "pleased to offer"]
                 interview_kws = ["interview", "schedule a call", "technical round",
                                  "hr round", "assessment", "next steps"]
-                body_lower = body.lower()
-                if any(k in body_lower for k in offer_kws):
+
+                if any(kw in (subject + " " + body).lower() for kw in offer_kws):
                     new_status = STATUS["OFFER"]
-                elif any(k in body_lower for k in interview_kws):
+                elif any(kw in (subject + " " + body).lower() for kw in interview_kws):
                     new_status = STATUS["INTERVIEW"]
                 else:
                     new_status = STATUS["SHORTLISTED"]
 
                 if application_exists(company, role):
-                    update_application_status(
+                    result = update_application_status(
                         company, role, new_status,
-                        notes=f"Keyword: {keyword}",
                         response_date=today, email_subject=subject
                     )
-                    update_count += 1
+                    if result:
+                        update_count += 1
                 else:
                     add_application(
                         company=company, role=role, source="Email/Auto",
                         status=new_status,
-                        notes=f"Auto-detected. Keyword: {keyword}",
-                        email_subject=subject
+                        notes="Auto-detected positive response", email_subject=subject
                     )
                     new_count += 1
 
             elif category == 'rejection':
                 if application_exists(company, role):
-                    update_application_status(
+                    result = update_application_status(
                         company, role, STATUS["REJECTED"],
-                        notes=f"Rejection. Keyword: {keyword}",
                         response_date=today, email_subject=subject
                     )
-                    update_count += 1
+                    if result:
+                        update_count += 1
                 else:
                     add_application(
                         company=company, role=role, source="Email/Auto",
                         status=STATUS["REJECTED"],
-                        notes=f"Rejection auto-detected. Keyword: {keyword}",
-                        email_subject=subject
+                        notes="Auto-detected rejection", email_subject=subject
                     )
                     new_count += 1
 
             processed_ids.add(msg_id)
 
         except Exception as e:
-            print(f"  Error processing {msg_id}: {e}")
+            print(f"  Error processing message {msg_id}: {e}")
             continue
 
     save_processed_ids(processed_ids)
-    print(f"\nScan complete - {new_count} new | {update_count} updated | {skipped_count} skipped")
+    print(f"\nDone! New: {new_count}, Updated: {update_count}, Skipped: {skipped_count}")
     return new_count, update_count
+
+if __name__ == "__main__":
+    scan_gmail()
